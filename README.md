@@ -1,0 +1,1 @@
+This repo implements the proof of concept for genetic AI based DL user scheduling for 5G. It also compares the proposed genetic AI approach vs baselines approaches like round robin and proportional fair. This implementation also allows the user to pick the KPI or the application with respective QoS to optimize while scheduling users. 
