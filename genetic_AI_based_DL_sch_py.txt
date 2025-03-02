@@ -1,0 +1,410 @@
+%matplotlib inline
+import matplotlib.pyplot as plt
+import random
+import time
+import numpy as np
+
+# Mapping CQI to MCS index and coding rate
+CQI_MCS_MAPPING = {
+    1: (0, 1/8),
+    2: (1, 1/4),
+    3: (2, 1/2),
+    4: (3, 3/4),
+    5: (4, 1/2),
+    6: (5, 3/4),
+    7: (6, 2/3),
+    8: (7, 5/6),
+    9: (8, 3/4),
+    10: (9, 1/2),
+    11: (10, 5/6),
+    12: (11, 2/3),
+    13: (12, 3/4),
+    14: (13, 5/6),
+    15: (14, 1/2)
+}
+
+# Bits per symbol based on modulation type
+BITS_PER_SYMBOL = {
+    0: 2,  # QPSK
+    1: 2,  # QPSK
+    2: 2,  # QPSK
+    3: 2,  # QPSK
+    4: 4,  # 16-QAM
+    5: 4,  # 16-QAM
+    6: 6,  # 64-QAM
+    7: 6,  # 64-QAM
+    8: 6,  # 64-QAM
+    9: 6,  # 64-QAM
+    10: 6,  # 64-QAM
+    11: 8,  # 256-QAM
+    12: 8,  # 256-QAM
+    13: 8,  # 256-QAM
+    14: 8   # 256-QAM
+}
+
+# Function to display options and get user selection
+def display_options():
+    print("Select the criteria for optimizing user scheduling:")
+    print("1: Throughput (Default)")
+    print("2: Packet Loss")
+    print("3: Quality of Service (QoS)")
+    print("  A: Interactive Voice (VoNR)")
+    print("  B: Video Streaming (e.g., HD Video)")
+    print("  C: Video Streaming (e.g., 4K Video)")
+    print("  D: Web Browsing")
+    print("  E: Gaming (Online Gaming)")
+    print("  F: Mission Critical")
+    selection = input("Enter your choice (1, 2, or 3[A-F]): ")
+    return selection.strip()
+
+# Function to generate random parameter values for a given user
+def generate_random_parameters(user):
+    BufferStatusReport = random.randint(0, 100)  # Random BSR (0 to 100 kBytes)
+    CQI = random.randint(1, 15)  # Random CQI (1 to 15), will map to MCS per RE
+    QualityOfServiceRequirement = random.randint(1, 6)  # Random QoS requirement (1 to 6)
+    SINR = round(random.uniform(-10, 30), 2)  # Random SINR (-10 to 30 dB)
+    BLER = round(random.uniform(0, 10), 1)  # Random BLER (0 to 10%)
+
+    # Return the random values
+    return {
+        'UserID': user,
+        'BufferStatusReport': BufferStatusReport,
+        'CQI': CQI,
+        'QualityOfServiceRequirement': QualityOfServiceRequirement,
+        'SINR': SINR,
+        'BLER': BLER
+    }
+
+# Function to calculate effective throughput for a user
+def calculate_effective_throughput(CQI, BLER, bandwidth):
+    # Map CQI to MCS index and coding rate
+    mcs_index, coding_rate = CQI_MCS_MAPPING.get(CQI, (0, 1/8))  # Default to lowest if CQI is invalid
+    # Get bits per symbol from mapping
+    bits_per_symbol = BITS_PER_SYMBOL[mcs_index]
+    number_of_symbols_in_1s = 14 * 2 * 1000
+    # Calculate the theoretical bit rate (bits per second)
+    theoretical_bit_rate = (bandwidth/15000) * bits_per_symbol * coding_rate * number_of_symbols_in_1s # bits per second
+    # Calculate effective throughput
+    effective_throughput = theoretical_bit_rate * (1 - (BLER/100))  # accounting for BLER
+    return effective_throughput/1e6
+
+# Function to select users in a round-robin fashion
+def select_users_round_robin(users, current_index, users_per_round):
+    selected_users = []
+    user_count = len(users)
+
+    for _ in range(users_per_round):
+        selected_user = users[current_index % user_count]  # Pick the next user in the list
+        selected_users.append(selected_user)
+        current_index += 1  # Move to the next user for the next round
+
+    return selected_users, current_index
+
+# Function to select users based on proportional fairness
+def select_users_proportional_fairness(users, performance_scores, users_per_round, current_time, last_scheduled_time):
+    # Calculate total performance
+    total_performance = sum(performance_scores[user] for user in users)
+
+    # Calculate adjusted performance scores
+    adjusted_scores = {}
+    for user in users:
+        time_since_last_scheduled = current_time - last_scheduled_time[user]
+        # Combine total performance and last scheduled time with weights
+        adjusted_score = (0.75 * (performance_scores[user] / total_performance if total_performance > 0 else 0)) + \
+                         (0.25 * (time_since_last_scheduled / (current_time + 1)))  # Adding 1 to avoid division by zero
+        adjusted_scores[user] = adjusted_score
+
+    # Select users based on weighted probabilities using adjusted scores
+    total_adjusted = sum(adjusted_scores[user] for user in users)
+    probabilities = [(adjusted_scores[user] / total_adjusted if total_adjusted > 0 else 0) for user in users]
+
+    weighted_users = []
+    for user, prob in zip(users, probabilities):
+        count = int(prob * 100)  # Scale the probability for selection
+        weighted_users.extend([user] * count)  # Repeat users based on their probability
+
+    # Select unique users using random.sample to avoid duplicates
+    total_selected_users = 0
+    selected_users =[]
+    if weighted_users == []:
+        weighted_users = users
+
+    while total_selected_users < users_per_round:
+      selected_user = random.choice(weighted_users)
+      selected_users.append(selected_user)
+      weighted_users = [x for x in weighted_users if x != selected_user]
+      total_selected_users += 1
+
+    # Update the last scheduled time for selected users
+    for user in selected_users:
+        last_scheduled_time[user] = current_time
+
+    return selected_users
+
+def initialize_population(pop_size, num_users, users_per_round):
+    """Create an initial population of random sets of 3 users from 12."""
+    population = [np.random.choice(num_users, users_per_round, replace=False) for _ in range(10)]
+    return population
+
+def switch_case(case):
+    if case == 'E' or case == 'F':
+      return 2
+    else:
+      return 1
+
+def fitness(criteria, individual, bw_per_user, users_per_round, user_data):
+    """Calculate the fitness of an individual (set of 3 users)."""
+    individual_fitness = 0
+
+    if criteria == '1':  # Throughput (default)
+      for user in individual:
+        current_user_data = user_data[user]
+        effective_throughput = calculate_effective_throughput(current_user_data["CQI"], current_user_data["BLER"], bw_per_user)
+        individual_fitness += effective_throughput
+
+    elif criteria == '2':  # Packet Loss
+      for user in individual:
+        current_user_data = user_data[user]
+        user_bler = current_user_data["BLER"]
+        individual_fitness -= user_bler
+
+    elif criteria.startswith('3'):  # Quality of Service (QoS)
+        sub_criteria = switch_case(criteria[-1])
+        if sub_criteria == 1:
+          for user in individual:
+            current_user_data = user_data[user]
+            effective_throughput = calculate_effective_throughput(current_user_data["CQI"], current_user_data["BLER"], bw_per_user)
+            individual_fitness += effective_throughput
+        #
+        else:
+          for user in individual:
+            current_user_data = user_data[user]
+            user_bler = current_user_data["BLER"]
+            individual_fitness -= user_bler
+
+    else:
+        for user in individual:
+          current_user_data = user_data[user]
+          effective_throughput = calculate_effective_throughput(current_user_data["CQI"], current_user_data["BLER"], bw_per_user)
+          individual_fitness += effective_throughput
+
+    return individual_fitness
+
+def selection(population, fitnesses, num_parents):
+    """Select the top individuals (parents) based on fitness."""
+    parents = np.argsort(fitnesses)[-num_parents:]  # Select the best individuals
+    return [population[i] for i in parents]
+
+def crossover(parent1, parent2, users_per_round):
+    """Perform crossover between two parents."""
+
+    crossover_point = random.randint(1, users_per_round-1)
+    initial_child = np.concatenate([parent1[:crossover_point], parent2[crossover_point:]])
+
+    # Use np.unique to remove duplicates (preserves order if return_index is used)
+    unique_child, unique_indices = np.unique(initial_child, return_index=True)
+    unique_child = unique_child[np.argsort(unique_indices)]  # To keep the original order
+
+    # Ensure the child array length matches the original arrays
+    if len(unique_child) < len(parent1):
+        remaining_spots = len(parent1) - len(unique_child)
+
+        # Fill from array1, avoiding duplicates
+        remaining_elements_from_parent1 = parent1[np.isin(parent1, unique_child, invert=True)]
+
+        # If not enough from array1, take from array2
+        if len(remaining_elements_from_parent1) < remaining_spots:
+            unique_child = np.concatenate((unique_child, remaining_elements_from_parent1))
+            remaining_spots -= len(remaining_elements_from_parent1)
+            remaining_elements_from_parent2 = parent2[np.isin(parent2, unique_child, invert=True)]
+            unique_child = np.concatenate((unique_child, remaining_elements_from_parent2[:remaining_spots]))
+        else:
+            unique_child = np.concatenate((unique_child, remaining_elements_from_parent1[:remaining_spots]))
+    return unique_child
+
+
+def mutate(individual, mutation_rate, num_users, users_per_round):
+    """Mutate an individual by randomly replacing one user with a new one."""
+    if np.random.rand() < mutation_rate:
+        individual[random.randint(0, users_per_round-1)] = random.choice([i for i in range(num_users) if i not in individual])
+    return individual
+
+def select_users_genetic_AI(criteria, pop_size, population, num_generations, num_parents, mutation_rate, num_users, users_per_round, user_data, bw_per_user):
+  for generation in range(num_generations):
+    # Evaluate fitness of each individual
+    fitnesses = [fitness(criteria, individual, bw_per_user, users_per_round, user_data) for individual in population]
+
+    # Select parents
+    parents = selection(population, fitnesses, num_parents)
+
+    # Create new population via crossover and mutation
+    new_population = []
+    for i in range(pop_size):
+        # Select two parents randomly
+        parent1, parent2 = random.sample(parents, 2)
+
+        # Perform crossover and mutation
+        child = crossover(parent1, parent2, users_per_round)
+        #print(child)
+        #print("finished printing child after crossover")
+        child = mutate(child, mutation_rate, num_users, users_per_round)
+
+        new_population.append(child)
+
+    population = new_population
+
+  # Track and print the best solution
+  best_individual = population[np.argmax(fitnesses)]
+  best_fitness = np.max(fitnesses)
+  return best_individual, best_fitness, population
+
+# Main function to simulate random user parameters over time instants
+def simulate_user_parameters(num_users, num_iterations, users_per_round=3, delay=1):
+    users = [i for i in range(num_users)]
+    performance_scores = {user: 0 for user in users}  # Initialize performance scores
+    last_scheduled_time = {user: 0 for user in users}  # Initialize last scheduled time scores
+    current_user_index = 0  # This will keep track of the next user to start the round
+    bandwidth = 10e6  # Example: 10 MHz bandwidth
+    bw_per_user = bandwidth/users_per_round
+
+    # Lists to store effective throughput and max delay over time
+    rr_throughput_over_time = []
+    pf_throughput_over_time = []
+    rr_bler_over_time = []
+    pf_bler_over_time = []
+    gen_ai_throughput_over_time = []
+    gen_ai_bler_over_time = []
+    max_scheduling_delay_over_time = []
+
+    criteria = display_options()
+
+    # Select users based on the chosen criteria
+    #selected_users = select_users_based_on_criteria(criteria, users, performance_scores, users_per_round=3, current_time=t)
+
+    # Genetic algorithm parameters
+    pop_size = 50
+    num_generations = 10
+    num_parents = 5
+    mutation_rate = 0.1
+
+    # Initialize population
+    population = initialize_population(pop_size, num_users, users_per_round)
+
+
+    # Outer loop for each time instant
+    for t in range(num_iterations):
+        print(f"\n--- Time Instant: {t + 1} ---")
+
+        user_data = [generate_random_parameters(user) for user in users]
+
+        # Select users using round-robin
+        round_robin_users, current_user_index = select_users_round_robin(users, current_user_index, users_per_round)
+        print("Round Robin Selected Users:", round_robin_users)
+
+        # Select users using proportional fairness
+        proportional_fair_users = select_users_proportional_fairness(users, performance_scores, users_per_round, t, last_scheduled_time)
+        print("Proportional Fairness Selected Users:", proportional_fair_users)
+
+        # Select users using proportional fairness
+        genetic_AI_users, total_fitness_gen_ai, population = select_users_genetic_AI(criteria, pop_size, population, num_generations, num_parents, mutation_rate, num_users, users_per_round, user_data, bw_per_user)
+        print("Genetic AI Selected Users:", genetic_AI_users)
+
+        # Initialize total effective throughput for the current time instant
+        total_effective_throughput_rr = 0.0  # Round-robin total
+        total_effective_throughput_pf = 0.0  # Proportional fairness total
+
+        total_bler_rr = 0.0  # Round-robin total bler
+        total_bler_pf = 0.0  # Proportional fairness total bler
+
+        # Inner loop to generate random values for the selected users
+        for user in round_robin_users:  # Round-robin users
+            current_user_data = user_data[user]
+            effective_throughput = calculate_effective_throughput(current_user_data["CQI"], current_user_data["BLER"], bw_per_user)
+            total_effective_throughput_rr += effective_throughput
+
+            total_bler_rr += current_user_data["BLER"]
+
+        # Inner loop for proportional fair users
+        for user in proportional_fair_users:  # Proportional fairness users
+            current_user_data = user_data[user]
+            effective_throughput = calculate_effective_throughput(current_user_data["CQI"], current_user_data["BLER"], bw_per_user)
+            total_effective_throughput_pf += effective_throughput
+            performance_scores[user] = effective_throughput  # Use effective throughput as the performance metric
+
+            total_bler_pf += current_user_data["BLER"]
+
+        max_scheduling_delay = 0
+        for user in users:
+          time_since_last_scheduled = t - last_scheduled_time[user]
+          if time_since_last_scheduled > max_scheduling_delay:
+            max_scheduling_delay = time_since_last_scheduled
+
+        # Store the effective throughput for plotting
+        rr_throughput_over_time.append(total_effective_throughput_rr/users_per_round)
+        pf_throughput_over_time.append(total_effective_throughput_pf/users_per_round)
+
+        rr_bler_over_time.append(total_bler_rr/users_per_round)
+        pf_bler_over_time.append(total_bler_pf/users_per_round)
+
+        if criteria == '2' or criteria[-1] == 'E' or criteria[-1] == 'F':
+          gen_ai_bler_over_time.append(-total_fitness_gen_ai/users_per_round)
+        else:
+          gen_ai_throughput_over_time.append(total_fitness_gen_ai/users_per_round)
+
+        max_scheduling_delay_over_time.append(max_scheduling_delay)
+
+        # Print total effective throughput for round-robin and proportional fairness users
+        print(f"Total Effective Average User Throughput for Round Robin Users: {total_effective_throughput_rr/users_per_round:.2f} Mbps")
+        print(f"Total Effective Average User Throughput for Proportional Fairness Users: {total_effective_throughput_pf/users_per_round:.2f} Mbps")
+
+        print(f"Total Average User Bler for Round Robin Users: {total_bler_rr/users_per_round:.2f} %")
+        print(f"Total Average User Bler for Proportional Fairness Users: {total_bler_pf/users_per_round:.2f} %")
+
+        if criteria == '2' or criteria[-1] == 'E' or criteria[-1] == 'F':
+          print(f"Total Average User BLER for Genetic AI Users: {-total_fitness_gen_ai/users_per_round:.2f} %")
+        else:
+          print(f"Total Effective Average User Throughput for Genetic AI Users: {total_fitness_gen_ai/users_per_round:.2f} %")
+
+        print(f"Max Scheduling delay for the cell: {max_scheduling_delay:.2f} ms")
+
+        # Optional delay between time instants (for simulation purposes)
+        time.sleep(delay)
+
+    if criteria == '2' or criteria[-1] == 'E' or criteria[-1] == 'F':
+      plt.figure(figsize=(20, 5))
+      plt.plot(range(1, num_iterations + 1), rr_bler_over_time, marker='o', label='Round Robin BLER')
+      plt.plot(range(1, num_iterations + 1), pf_bler_over_time, marker='x', label='Proportional Fairness BLER')
+      plt.plot(range(1, num_iterations + 1), gen_ai_bler_over_time, marker='^', label='Genetic AI BLER')
+      plt.title('Average BLER Over Time')
+      plt.xlabel('Timeslot(ms)')
+      plt.ylabel('Average BLER (%)')
+      plt.xticks(range(1, num_iterations + 1))
+      plt.legend()
+      plt.grid()
+      plt.show()
+
+    else:
+      plt.figure(figsize=(20, 5))
+      plt.plot(range(1, num_iterations + 1), rr_throughput_over_time, marker='o', label='Round Robin Throughput')
+      plt.plot(range(1, num_iterations + 1), pf_throughput_over_time, marker='x', label='Proportional Fairness Throughput')
+      plt.plot(range(1, num_iterations + 1), gen_ai_throughput_over_time, marker='^', label='Genetic AI Throughput')
+      plt.title('Average User Throughput Over Time')
+      plt.xlabel('Timeslot(ms)')
+      plt.ylabel('Average User Throughput (Mbps)')
+      plt.xticks(range(1, num_iterations + 1))
+      plt.legend()
+      plt.grid()
+      plt.show()
+
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(range(1, num_iterations + 1), max_scheduling_delay_over_time, marker='x', label='Max scheduling delay')
+    plt.title('Max scheduling delay Over Time')
+    plt.xlabel('Timeslot(ms)')
+    plt.ylabel('Max scheduling delay (ms)')
+    plt.xticks(range(1, num_iterations + 1))
+    plt.legend()
+    plt.grid()
+    plt.show()
+
+simulate_user_parameters(num_users=15, num_iterations=15, users_per_round=5, delay=1)
